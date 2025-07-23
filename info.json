@@ -1,6 +1,6 @@
 {
   "new_version": "3.15.0",
-  "download_link": "https://github.com/your-github-username/your-repo-name/releases/download/v3.15.0/elementor-pro.zip",
+  "download_link": "https://github.com/abisanthm/elementor/archive/refs/tags/elementor.zip",
   "requires": "6.0",
   "tested": "6.5",
   "last_updated": "2024-07-23",

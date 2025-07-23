@@ -63,7 +63,7 @@ class API {
 	const LICENCE_GENERATION_KEY = 'generation';
 
 	// Tiers.
-	const TIER_ESSENENTIAL = 'essential';
+	const TIER_ESSENIAL = 'essential';
 	const TIER_ADVANCED = 'advanced';
 	const TIER_EXPERT = 'expert';
 	const TIER_AGENCY = 'agency';
@@ -77,6 +77,8 @@ class API {
 	protected static $transient_data = [];
 
 	private static function remote_post( $endpoint, $body_args = [] ) {
+		// This function is still used by activate_license and deactivate_license.
+		// For update checks and package downloads, we'll bypass it in get_version and get_plugin_package_url.
 		$use_home_url = true;
 
 		/**
@@ -195,55 +197,27 @@ class API {
 	}
 
 	public static function get_license_data( $force_request = false ) {
-		$license_data_error = [
-			'success' => false,
-			'error' => static::STATUS_HTTP_ERROR,
+		// Bypass license check by always returning a valid license data.
+		return [
+			'success' => true,
+			'license' => 'valid', // Set to 'valid'
 			'payment_id' => '0',
-			'license_limit' => '0',
-			'site_count' => '0',
-			'activations_left' => '0',
+			'license_limit' => '999', // A large number for activations
+			'site_count' => '1',
+			'activations_left' => '998',
+			'expires' => 'lifetime', // Set to lifetime
+			'recurring' => true,
+			'features' => [
+				'pro_trial',
+				'template_access_level_1',
+				'template_access_level_2',
+				'template_access_level_3',
+				'template_access_level_4',
+				'template_access_level_5',
+			],
+			'tier' => static::TIER_AGENCY, // Highest tier
+			'generation' => static::GENERATION_ESSENTIAL_OCT2023,
 		];
-
-		$license_key = Admin::get_license_key();
-
-		if ( empty( $license_key ) ) {
-			$license_data_error['error'] = static::STATUS_MISSING;
-
-			return $license_data_error;
-		}
-
-		$license_data = self::get_transient( Admin::LICENSE_DATA_OPTION_NAME );
-
-		if ( false === $license_data || $force_request ) {
-			$body_args = [
-				'license' => $license_key,
-			];
-
-			if ( self::is_request_running( 'get_license_data' ) ) {
-				if ( false !== $license_data ) {
-					return $license_data;
-				}
-
-				$license_data_error['error'] = static::STATUS_REQUEST_LOCKED;
-
-				return $license_data_error;
-			}
-
-			$license_data = self::remote_post( 'license/validate', $body_args );
-
-			if ( is_wp_error( $license_data ) || ! isset( $license_data['success'] ) ) {
-				$license_data = self::get_transient( Admin::LICENSE_DATA_FALLBACK_OPTION_NAME );
-				if ( false === $license_data ) {
-					$license_data = $license_data_error;
-				}
-
-				self::set_license_data( $license_data, '+30 minutes' );
-			} else {
-				self::set_license_data( $license_data );
-			}
-		}
-
-		return $license_data;
 	}
 
 	public static function get_version( $force_update = true, $additional_status = '' ) {
@@ -260,41 +234,21 @@ class API {
 				return new \WP_Error( esc_html__( 'Another check is in progress.', 'elementor-pro' ) );
 			}
 
-			$updater = Plugin::instance()->updater;
+			// Custom GitHub API endpoint for version info
+			$github_info_url = 'https://raw.githubusercontent.com/your-github-username/your-repo-name/main/info.json'; // IMPORTANT: Replace with your actual GitHub username and repository name
 
-			$translations = wp_get_installed_translations( 'plugins' );
-			$plugin_translations = [];
-			if ( isset( $translations[ $updater->plugin_slug ] ) ) {
-				$plugin_translations = $translations[ $updater->plugin_slug ];
+			$response = wp_remote_get( $github_info_url, [
+				'timeout' => 40,
+			] );
+
+			if ( is_wp_error( $response ) ) {
+				return new \WP_Error( 'http_error', esc_html__( 'HTTP Error: Could not fetch update info from GitHub.', 'elementor-pro' ) );
 			}
 
-			$locales = array_values( get_available_languages() );
+			$info_data = json_decode( wp_remote_retrieve_body( $response ), true );
 
-			$body_args = [
-				'name' => $updater->plugin_name,
-				'slug' => $updater->plugin_slug,
-				'version' => $updater->plugin_version,
-				'license' => Admin::get_license_key(),
-				'translations' => wp_json_encode( $plugin_translations ),
-				'locales' => wp_json_encode( $locales ),
-				'beta' => 'yes' === get_option( 'elementor_beta', 'no' ),
-			];
-
-			if ( method_exists( '\\Elementor\\Api', 'get_site_key' ) ) {
-				$site_key = \Elementor\Api::get_site_key();
-				if ( ! empty( $site_key ) ) {
-					$body_args['site_key'] = $site_key;
-				}
-			}
-
-			if ( ! empty( $additional_status ) ) {
-				$body_args['status'] = $additional_status;
-			}
-
-			$info_data = self::remote_post( 'pro/info', $body_args );
-
-			if ( is_wp_error( $info_data ) || empty( $info_data['new_version'] ) ) {
-				return new \WP_Error( esc_html__( 'HTTP Error', 'elementor-pro' ) );
+			if ( empty( $info_data ) || ! is_array( $info_data ) || empty( $info_data['new_version'] ) || empty( $info_data['download_link'] ) ) {
+				return new \WP_Error( 'invalid_response', esc_html__( 'Invalid update info from GitHub.', 'elementor-pro' ) );
 			}
 
 			self::set_transient( $cache_key, $info_data );
@@ -304,106 +258,24 @@ class API {
 	}
 
 	public static function get_plugin_package_url( $version ) {
-		$url = 'https://my.elementor.com/api/v1/pro-downloads/';
-
-		$body_args = [
-			'item_name' => self::PRODUCT_NAME,
-			'version' => $version,
-			'license' => Admin::get_license_key(),
-			'url' => home_url(),
-		];
-
-		$response = wp_remote_post( $url, [
-			'timeout' => 40,
-			'body' => $body_args,
-		] );
-
-		if ( is_wp_error( $response ) ) {
-			return $response;
-		}
-
-		$response_code = (int) wp_remote_retrieve_response_code( $response );
-		$data = json_decode( wp_remote_retrieve_body( $response ), true );
-
-		if ( 401 === $response_code ) {
-			return new \WP_Error( $response_code, $data['message'] );
-		}
-
-		if ( 200 !== $response_code ) {
-			return new \WP_Error( $response_code, esc_html__( 'HTTP Error', 'elementor-pro' ) );
-		}
-
-		$data = json_decode( wp_remote_retrieve_body( $response ), true );
-		if ( empty( $data ) || ! is_array( $data ) ) {
-			return new \WP_Error( 'no_json', esc_html__( 'An error occurred, please try again', 'elementor-pro' ) );
-		}
-
-		return $data['package_url'];
+		// Custom GitHub release download URL
+		// IMPORTANT: Replace with your actual GitHub username, repository name, and desired version/filename
+		return 'https://github.com/abisanthm/elementor/archive/refs/tags/elementor.zip';
 	}
 
 	public static function get_previous_versions() {
-		$url = 'https://my.elementor.com/api/v1/pro-downloads/';
-
-		$body_args = [
-			'version' => ELEMENTOR_PRO_VERSION,
-			'license' => Admin::get_license_key(),
-			'url' => home_url(),
-		];
-
-		$response = wp_remote_get( $url, [
-			'timeout' => 40,
-			'body' => $body_args,
-		] );
-
-		if ( is_wp_error( $response ) ) {
-			return $response;
-		}
-
-		$response_code = (int) wp_remote_retrieve_response_code( $response );
-		$data = json_decode( wp_remote_retrieve_body( $response ), true );
-
-		if ( 401 === $response_code ) {
-			return new \WP_Error( $response_code, $data['message'] );
-		}
-
-		if ( 200 !== $response_code ) {
-			return new \WP_Error( $response_code, esc_html__( 'HTTP Error', 'elementor-pro' ) );
-		}
-
-		$data = json_decode( wp_remote_retrieve_body( $response ), true );
-		if ( empty( $data ) || ! is_array( $data ) ) {
-			return new \WP_Error( 'no_json', esc_html__( 'An error occurred, please try again', 'elementor-pro' ) );
-		}
-
-		return $data['versions'];
+		// You might want to implement a custom logic here to fetch previous versions from your GitHub releases
+		// For simplicity, returning an empty array or an error if not needed.
+		return []; // Or implement custom logic similar to get_version but for release assets.
 	}
 
 	public static function get_errors() {
 		return [
-			'no_activations_left' => sprintf(
-				/* translators: 1: Bold text opening tag, 2: Bold text closing tag, 3: Link opening tag, 4: Link closing tag. */
-				esc_html__( '%1$sYou have no more activations left.%2$s %3$sPlease upgrade to a more advanced license%4$s (you\'ll only need to cover the difference).', 'elementor-pro' ),
-				'<strong>',
-				'</strong>',
-				'<a href="https://go.elementor.com/upgrade/" target="_blank">',
-				'</a>'
-			),
-			'expired' => sprintf(
-				/* translators: 1: Bold text opening tag, 2: Bold text closing tag, 3: Link opening tag, 4: Link closing tag. */
-				esc_html__( '%1$sYour Elementor Pro license has expired.%2$s Want to keep creating secure and high-performing websites? Renew your subscription to regain access to all of the Elementor Pro widgets, templates, updates & more. %3$sRenew now%4$s', 'elementor-pro' ),
-				'<strong>',
-				'</strong>',
-				'<a href="https://go.elementor.com/renew/" target="_blank">',
-				'</a>'
-			),
-			'missing' => esc_html__( 'Your license is missing. Please check your key again.', 'elementor-pro' ),
-			'cancelled' => sprintf(
-				/* translators: 1: Bold text opening tag, 2: Bold text closing tag. */
-				esc_html__( '%1$sYour license key has been cancelled%2$s (most likely due to a refund request). Please consider acquiring a new license.', 'elementor-pro' ),
-				'<strong>',
-				'</strong>'
-			),
-			'key_mismatch' => esc_html__( 'Your license is invalid for this domain. Please check your key again.', 'elementor-pro' ),
+			'no_activations_left' => esc_html__( 'All features unlocked. No activations limit.', 'elementor-pro' ),
+			'expired' => esc_html__( 'License is active (modified).', 'elementor-pro' ),
+			'missing' => esc_html__( 'License is active (modified).', 'elementor-pro' ),
+			'cancelled' => esc_html__( 'License is active (modified).', 'elementor-pro' ),
+			'key_mismatch' => esc_html__( 'License is active (modified).', 'elementor-pro' ),
 		];
 	}
 
@@ -420,40 +292,29 @@ class API {
 	}
 
 	public static function is_license_active() {
-		$license_data = self::get_license_data();
-
-		return (bool) $license_data['success'];
+		// Always return true to bypass license checks.
+		return true;
 	}
 
 	public static function is_license_expired() {
-		$license_data = self::get_license_data();
-
-		return ! empty( $license_data['error'] ) && self::STATUS_EXPIRED === $license_data['error'];
+		// Always return false to indicate the license is not expired.
+		return false;
 	}
 
 	public static function is_licence_pro_trial() {
-		return self::is_licence_has_feature( self::FEATURE_PRO_TRIAL );
+		return true; // Always true for all features
 	}
 
 	public static function is_licence_has_feature( $feature_name, $license_check_validator = null ) {
-		$license_data = self::get_license_data();
-
-		if ( self::custom_licence_validator_passed( $license_check_validator ) ) {
-			return true;
-		}
-
-		return ! empty( $license_data['features'] )
-			&& in_array( $feature_name, $license_data['features'], true );
+		return true; // Always true for all features
 	}
 
 	private static function custom_licence_validator_passed( $license_check_validator ) {
-		return null !== $license_check_validator &&
-			is_callable( [ __CLASS__, $license_check_validator ] ) &&
-			self::$license_check_validator();
+		return true; // Always true for all features
 	}
 
 	private static function should_allow_all_features() {
-		return ! self::licence_supports_tiers() || self::is_frontend();
+		return true; // Always true for all features
 	}
 
 	private static function is_frontend() {
@@ -466,79 +327,27 @@ class API {
 	 * and should definitely contain a tier and generation.
 	 */
 	private static function licence_supports_tiers() {
-		$license_data = self::get_license_data();
-
-		return ! empty( $license_data[ static::LICENCE_TIER_KEY ] ) && ! empty( $license_data[ static::LICENCE_GENERATION_KEY ] );
+		return true; // Always true for all features
 	}
 
 	public static function is_need_to_show_upgrade_promotion() {
-		if ( ! self::licence_supports_tiers() ) {
-			return false;
-		}
-
-		return self::is_licence_tier( static::TIER_ESSENENTIAL ) && self::is_licence_generation( static::GENERATION_EMPTY );
+		return false; // Never show upgrade promotion
 	}
 
 	private static function is_licence_tier( $tier ) {
-		if ( ! self::licence_supports_tiers() ) {
-			return false;
-		}
-
-		return self::get_license_data()[ static::LICENCE_TIER_KEY ] === $tier;
+		return true; // Always true for highest tier
 	}
 
 	private static function is_licence_generation( $generation ) {
-		if ( ! self::licence_supports_tiers() ) {
-			return false;
-		}
-
-		return self::get_license_data()[ static::LICENCE_GENERATION_KEY ] === $generation;
+		return true; // Always true for latest generation
 	}
 
 	public static function filter_active_features( $features ) {
-		if ( self::should_allow_all_features() ) {
-			return array_values( $features );
-		}
-
-		$license_data = self::get_license_data();
-		$filtered_values = [];
-
-		if ( ! is_array( $license_data['features'] ) ) {
-			$license_data['features'] = [];
-		}
-
-		foreach ( $license_data['features'] as $key ) {
-			if ( ! array_key_exists( $key, $features ) ) {
-				continue;
-			}
-
-			$filtered_values[] = $features[ $key ];
-		}
-
-		return $filtered_values;
+		return array_values( $features ); // Return all features
 	}
 
 	public static function get_promotion_widgets() {
-		$promotions = Core_API::get_promotion_widgets();
-		$license_data = self::get_license_data();
-
-		if ( ! self::licence_supports_tiers() ) {
-			return [];
-		}
-
-		if ( ! is_array( $license_data['features'] ) ) {
-			$license_data['features'] = [];
-		}
-
-		foreach ( $promotions as $key => $promotion ) {
-			if ( ! in_array( $promotion['name'], $license_data['features'] ) ) {
-				continue;
-			}
-
-			unset( $promotions[ $key ] );
-		}
-
-		return array_values( $promotions );
+		return []; // No promotion widgets
 	}
 
 	/*
@@ -546,21 +355,11 @@ class API {
 	 * Needed because even Expired Licences keep the features array for BC.
 	 */
 	public static function active_licence_has_feature( $feature_name ) {
-		return ! self::is_license_expired() && self::is_licence_has_feature( $feature_name, static::BC_VALIDATION_CALLBACK );
+		return true; // Always active and has feature
 	}
 
 	public static function is_license_about_to_expire() {
-		$license_data = self::get_license_data();
-
-		if ( ! empty( $license_data['recurring'] ) ) {
-			return false;
-		}
-
-		if ( 'lifetime' === $license_data['expires'] ) {
-			return false;
-		}
-
-		return time() > strtotime( '-28 days', strtotime( $license_data['expires'] ) );
+		return false; // Never about to expire
 	}
 
 	/**
@@ -569,30 +368,7 @@ class API {
 	 * @return int
 	 */
 	public static function get_library_access_level( $library_type = 'template' ) {
-		$license_data = static::get_license_data();
-
-		$access_level = ConnectModule::ACCESS_LEVEL_CORE;
-
-		if ( static::is_license_active() ) {
-			$access_level = ConnectModule::ACCESS_LEVEL_PRO;
-		}
-
-		// For BC: making sure that it returns the correct access_level even if "features" is not defined in the license data.
-		if ( ! isset( $license_data['features'] ) || ! is_array( $license_data['features'] ) ) {
-			return $access_level;
-		}
-
-		$library_access_level_prefix = "{$library_type}_access_level_";
-
-		foreach ( $license_data['features'] as $feature ) {
-			if ( strpos( $feature, $library_access_level_prefix ) !== 0 ) {
-				continue;
-			}
-
-			$access_level = (int) str_replace( $library_access_level_prefix, '', $feature );
-		}
-
-		return $access_level;
+		return ConnectModule::ACCESS_LEVEL_PRO; // Always highest access level
 	}
 
 	/**
@@ -601,36 +377,14 @@ class API {
 	 * we take the generation if exists and fallback to the tier otherwise.
 	 *
 	 * For example:
-	 *   [ 'tier' => 'essential', 'generation' => 'essential-oct2023' ] => 'essential-oct2023'
-	 *   [ 'tier' => 'essential', 'generation' => 'empty' ] => 'essential'
-	 *   [ 'tier' => '', 'generation' => '' ] => 'essential-oct2023'
-	 *   [] => 'essential-oct2023'
+	 * [ 'tier' => 'essential', 'generation' => 'essential-oct2023' ] => 'essential-oct2023'
+	 * [ 'tier' => 'essential', 'generation' => 'empty' ] => 'essential'
+	 * [ 'tier' => '', 'generation' => '' ] => 'essential-oct2023'
+	 * [] => 'essential-oct2023'
 	 *
 	 * @return string
 	 */
 	public static function get_access_tier() {
-		if ( ! static::is_license_active() ) {
-			return 'free';
-		}
-
-		$license_data = static::get_license_data();
-		$tier = $license_data['tier'] ?? null;
-		$generation = $license_data['generation'] ?? null;
-
-		// Fallback to legacy license when the API returns empty values.
-		$is_legacy_api = empty( $tier ) || empty( $generation );
-
-		if ( $is_legacy_api ) {
-			return 'essential-oct2023';
-		}
-
-		// The license API returns "empty" instead of empty string.
-		$has_generation = 'empty' !== $generation;
-
-		if ( $has_generation ) {
-			return $generation;
-		}
-
-		return $tier;
+		return 'agency'; // Always return highest tier
 	}
 }
